@@ -47,6 +47,10 @@ MATCH_RULES = """\
 You are writing a single-match preview for the 2026 FIFA World Cup. In addition
 to every standing content rule above, follow these:
 
+- Each preview must contain exactly ONE primary pick. Never combine picks with
+  '/' or 'and'. If multiple angles have value, choose the single strongest one
+  for the primary pick. Secondary angles can be mentioned in the betting_preview
+  prose but must not appear in the pick field.
 - Be honest about form limitations. National teams arrive on two or three warm-up
   friendlies and a qualifying campaign that ended months ago. Do not pretend two
   friendlies are form. "The warm-up results tell us little beyond squad selection"
@@ -62,8 +66,78 @@ to every standing content rule above, follow these:
   turf, host-nation crowd, travel between host cities).
 - Acknowledge the group context and what is at stake. A dead rubber reads
   differently to a must-win opener.
-- Keep scoreline predictions realistic. 1-0 and 2-1 are far more common than 4-2
-  in World Cup group stages. Do not chase drama.
+- TOURNAMENT SCORING CONTEXT: This World Cup is averaging 3.05 goals per match
+  through 48 games — the highest group-stage rate since 1958, well above the 2.5
+  average from 2018 and 2022. Only one match has finished 0-0 (Spain vs Cabo Verde
+  MD1). Calibrate picks accordingly:
+  * Default to Over 2.5 Goals unless both teams have a specific defensive profile
+    (e.g. both drew 0-0 earlier or a dead rubber where both park the bus).
+  * Default to BTTS Yes where both teams have shown attacking intent, even with a
+    clear quality gap. Lower-ranked sides (DR Congo, Curaçao, Iraq, Jordan, New
+    Zealand, Cabo Verde) have all scored against top opposition.
+  * MD3 squad rotation: teams already qualified often rest key players. Second-
+    string defenders tend to concede more — factor this into totals AND ML picks
+    (dead-rubber favourites are less reliable on the moneyline).
+  * Prefer smaller Asian Handicap lines or Double Chance over heavy favourite ML
+    in mismatch games. The expanded 48-team format has been more competitive than
+    expected.
+  * Scoreline predictions should reflect the 3.0+ average. 2-1 and 2-0 are the
+    new baseline; 3-1 and 2-2 are common. Do not default to 1-0.
+  * State the tournament scoring context briefly in the betting_preview so readers
+    understand the reasoning.
+"""
+
+
+KNOCKOUT_RULES = """\
+You are writing a knockout-round preview for the 2026 FIFA World Cup. In addition
+to every standing content rule, follow these knockout-specific instructions:
+
+TOURNAMENT CONTEXT (mandatory inclusions):
+- Open with how each team qualified: group position (1st/2nd/3rd), points, GD,
+  and a one-line read on their group-stage trajectory (e.g. "started slow, peaked
+  in MD3" or "dominant throughout but conceded in every game").
+- List each team's three group-stage results with scorelines.
+- Name every goalscorer from the tournament so far with their tally (e.g.
+  "Haaland 5, Sorloth 2, Odegaard 1"). Pull this from the tournament_stats
+  context block provided -- do not invent or estimate tallies.
+- Reference key moments: red cards, penalty saves, comeback wins, injuries
+  sustained during the group stage that affect selection.
+
+KNOCKOUT DYNAMICS:
+- There are no draws. If level after 90 minutes, extra time and penalties follow.
+  Reference each team's penalty shootout history and temperament where relevant.
+- Yellow card accumulation resets after the group stage. Note any players who
+  were suspended for MD3 and are now available, or any who picked up knocks.
+- Squad rotation from MD3 dead rubbers means some teams' best XI hasn't played
+  together for 6+ days. Flag where match sharpness could be an issue.
+- Fatigue and travel matter more in knockouts. Note days of rest between last
+  group game and this fixture, plus any cross-country travel between venues.
+
+BETTING CALIBRATION:
+- The tournament is averaging {goals_per_match} goals per match. Continue to
+  calibrate totals picks against this baseline, but note that knockout football
+  historically trends slightly lower than group stages (higher stakes, more
+  cautious approaches). A small regression toward 2.5 is reasonable.
+- Knockout upsets are more common than group-stage upsets because one bad half
+  ends your tournament. Double Chance and Draw No Bet offer value on live
+  underdogs. Do not dismiss lower-ranked teams that showed fight in the groups.
+- Asian Handicap lines tighten in knockouts. Be precise about where value sits.
+- Each preview must contain exactly ONE primary pick. Never combine picks with
+  '/' or 'and' or '+'. Secondary angles go in the prose only.
+
+HEADLINE & FRAMING:
+- The headline must capture the elimination stakes. "Loser Goes Home" energy
+  without being cliche.
+- Acknowledge the bracket path -- who the winner likely faces next. This adds
+  tactical context (teams might play for a specific side of the draw).
+- Reference the venue, crowd composition (host-nation advantage for USA/Mexico/
+  Canada), and conditions.
+
+SCORELINE PREDICTIONS:
+- Reflect the knockout context. 1-0 and 2-1 are more common in elimination
+  games than group stages. Scoreline predictions can trend slightly lower than
+  the group-stage calibration, but do not default to 0-0 draws (the match must
+  produce a winner).
 """
 
 
@@ -176,13 +250,137 @@ def _team_block(label: str, t: dict) -> str:
 {players}"""
 
 
-def preview_prompt(match: dict, ta: dict, tb: dict, odds: dict | None) -> str:
+_ORDINAL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+
+
+def build_tournament_stats(sb, team_a_id: str, team_b_id: str) -> tuple[str, float]:
+    """Build the tournament_stats prompt block and return (block_text, goals_per_match).
+
+    Aggregates from completed group-stage matches: per-team results, record, group
+    finishing position, and goalscorer tallies from match_events. The tournament
+    GPM is averaged across every completed match (group + any knockouts so far).
+    """
+    matches = (
+        sb.table("wc_matches")
+        .select("match_number,stage,group_letter,team_a_id,team_b_id,"
+                "score_a,score_b,result,status,match_events")
+        .eq("status", "completed")
+        .execute()
+        .data
+    )
+    teams = sb.table("wc_teams").select("id,name,group_letter").execute().data
+    name_of = {t["id"]: t["name"] for t in teams}
+    group_of = {t["id"]: t["group_letter"] for t in teams}
+
+    scored = [m for m in matches if m["score_a"] is not None and m["score_b"] is not None]
+    if scored:
+        gpm = round(sum(m["score_a"] + m["score_b"] for m in scored) / len(scored), 2)
+    else:
+        gpm = 2.5
+    completed_n = len(scored)
+
+    def team_record(team_id: str) -> dict:
+        letter = group_of.get(team_id)
+        # Group-stage matches feed the group standings block below. The team's
+        # own record (W/D/L, scorers, results list) spans every completed match
+        # they've played — group + knockouts — so knockout previews see the
+        # full tournament picture.
+        group_matches = [m for m in scored
+                         if m["stage"] == "Group Stage" and m["group_letter"] == letter]
+        own = [m for m in scored if team_id in (m["team_a_id"], m["team_b_id"])]
+        own.sort(key=lambda m: m["match_number"])
+
+        results, w, d, l, gf, ga = [], 0, 0, 0, 0, 0
+        scorers: dict[str, int] = {}
+        for m in own:
+            is_a = m["team_a_id"] == team_id
+            us, them = (m["score_a"], m["score_b"]) if is_a else (m["score_b"], m["score_a"])
+            opp_id = m["team_b_id"] if is_a else m["team_a_id"]
+            opp = name_of.get(opp_id, "?")
+            # Determine outcome, respecting knockout shootouts. A 1-1 draw with
+            # result='team_b_pens' means team_b advanced on penalties and gets
+            # the W; team_a takes the L. Ordinary regulation results still use
+            # goal comparison.
+            result = m.get("result")
+            if us > them:
+                outcome = "W"
+            elif us < them:
+                outcome = "L"
+            elif result == "team_a_pens":
+                outcome = "W" if is_a else "L"
+            elif result == "team_b_pens":
+                outcome = "L" if is_a else "W"
+            else:
+                outcome = "D"
+            if outcome == "W": w += 1
+            elif outcome == "D": d += 1
+            else: l += 1
+            gf += us; ga += them
+            pens_tag = " (pens)" if result in ("team_a_pens", "team_b_pens") else ""
+            results.append(f"vs {opp}: {us}-{them} {outcome}{pens_tag}")
+            for ev in (m.get("match_events") or []):
+                et = (ev.get("event_type") or "").lower()
+                ev_side = ev.get("team")
+                ours = "a" if is_a else "b"
+                if et in ("goal", "penalty") and ev_side == ours:
+                    p = (ev.get("player") or "").strip()
+                    if p:
+                        scorers[p] = scorers.get(p, 0) + 1
+
+        # Group standings (4 teams in the group), rank by points/GD/GF.
+        groupmates: dict[str, dict] = {}
+        for m in group_matches:
+            for tid, sf, sa in ((m["team_a_id"], m["score_a"], m["score_b"]),
+                                (m["team_b_id"], m["score_b"], m["score_a"])):
+                row = groupmates.setdefault(tid, {"pts": 0, "gd": 0, "gf": 0})
+                row["pts"] += 3 if sf > sa else 1 if sf == sa else 0
+                row["gd"] += sf - sa
+                row["gf"] += sf
+        ranked = sorted(groupmates.items(),
+                        key=lambda kv: (-kv[1]["pts"], -kv[1]["gd"], -kv[1]["gf"]))
+        position = next((i + 1 for i, (tid, _) in enumerate(ranked) if tid == team_id), 0)
+
+        return {
+            "group": letter, "position": position,
+            "results": results, "w": w, "d": d, "l": l,
+            "gf": gf, "ga": ga, "gd": gf - ga, "pts": w * 3 + d,
+            "scorers": sorted(scorers.items(), key=lambda kv: (-kv[1], kv[0])),
+        }
+
+    def fmt(team_id: str) -> str:
+        r = team_record(team_id)
+        nm = name_of.get(team_id, "?")
+        pos = _ORDINAL.get(r["position"], f"{r['position']}th") if r["position"] else "?"
+        results_block = "\n    ".join(r["results"]) if r["results"] else "(no completed group matches)"
+        gd_str = f"+{r['gd']}" if r["gd"] > 0 else str(r["gd"])
+        scorers_str = ", ".join(f"{p} {n}" for p, n in r["scorers"]) or "none recorded"
+        return (
+            f"{nm} -- Group {r['group']}, finished {pos}:\n"
+            f"  Results:\n    {results_block}\n"
+            f"  Record: {r['w']}W-{r['d']}D-{r['l']}L, GF {r['gf']}, GA {r['ga']}, "
+            f"GD {gd_str}, {r['pts']} points\n"
+            f"  Goalscorers: {scorers_str}"
+        )
+
+    block = (
+        "TOURNAMENT STATS (use exactly these numbers -- do not invent or estimate):\n\n"
+        f"Tournament average so far: {gpm} goals per match across {completed_n} "
+        f"completed matches.\n\n"
+        f"{fmt(team_a_id)}\n\n"
+        f"{fmt(team_b_id)}"
+    )
+    return block, gpm
+
+
+def preview_prompt(match: dict, ta: dict, tb: dict, odds: dict | None,
+                   tournament_stats: str | None = None,
+                   goals_per_match: float | None = None) -> str:
     kickoff = match.get("kickoff_utc") or "TBC"
+    is_group = match["stage"] == "Group Stage"
     context = (
         f"Group {match.get('group_letter')} matchday "
         f"{1 if match['match_number'] <= 24 else 2 if match['match_number'] <= 48 else 3}"
-        if match["stage"] == "Group Stage"
-        else match["stage"]
+        if is_group else match["stage"]
     )
     odds_note = (
         f"Current odds from {odds.get('source')}: {json.dumps({k: v for k, v in odds.items() if k != 'source'})}. "
@@ -192,9 +390,17 @@ def preview_prompt(match: dict, ta: dict, tb: dict, odds: dict | None) -> str:
         "(match result, over/under 2.5, both teams to score) from a major bookmaker "
         "and set betting_preview.source to that bookmaker."
     )
-    return f"""\
-{MATCH_RULES}
 
+    if is_group:
+        rules_block = MATCH_RULES
+        stats_section = ""
+    else:
+        rules_block = KNOCKOUT_RULES.format(goals_per_match=goals_per_match or 2.5)
+        stats_section = f"\n{tournament_stats}\n" if tournament_stats else ""
+
+    return f"""\
+{rules_block}
+{stats_section}
 Write the preview for this 2026 FIFA World Cup fixture.
 
 MATCH: {ta['name']} vs {tb['name']}
@@ -299,9 +505,18 @@ def run_match(sb, client, match: dict, dry_run: bool) -> bool:
     slug = build_slug(match, ta["slug"], tb["slug"])
     print(f"  - Match {match['match_number']}: {ta['name']} vs {tb['name']}  [{slug}]", flush=True)
 
+    stats_block, gpm = (None, None)
+    if match["stage"] != "Group Stage":
+        stats_block, gpm = build_tournament_stats(sb, match["team_a_id"], match["team_b_id"])
+
     odds = fetch_odds(ta["name"], tb["name"])
     try:
-        data = ask_json(client, preview_prompt(match, ta, tb, odds), max_tokens=8000)
+        data = ask_json(
+            client,
+            preview_prompt(match, ta, tb, odds,
+                           tournament_stats=stats_block, goals_per_match=gpm),
+            max_tokens=8000,
+        )
     except Exception as e:  # noqa: BLE001
         print(f"      FAIL: {e}")
         return False
