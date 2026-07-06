@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 from wc_lib import get_anthropic, get_supabase, lint_record
@@ -475,6 +476,48 @@ def lint_preview(label: str, data: dict) -> list[str]:
     return issues
 
 
+def check_scoreline_pick_consistency(label: str, data: dict) -> list[str]:
+    """Warn (don't correct) when the SavvyPlays pick contradicts the predicted
+    scoreline. Catches Over/Under-vs-total and BTTS-vs-clean-sheet mismatches.
+
+    The pick is left as-is: some picks are deliberate value plays that differ
+    from the modal scoreline. This surface only warns so a human can eyeball
+    the tradeoff.
+    """
+    sp = (data.get("scoreline_prediction") or "").strip()
+    bp = data.get("betting_preview") or {}
+    pick = (bp.get("savvyplays_pick") or "").strip()
+    if not sp or not pick:
+        return []
+    m = re.search(r"(\d+)\s*[-–—]\s*(\d+)", sp)
+    if not m:
+        return []
+    a, b = int(m.group(1)), int(m.group(2))
+    total = a + b
+    plow = pick.lower()
+    out: list[str] = []
+
+    ou = re.search(r"\b(over|under)\s+(\d+(?:\.\d+)?)", plow)
+    if ou:
+        line = float(ou.group(2))
+        if ou.group(1) == "under" and total > line:
+            out.append(f"{label}: scoreline {a}-{b} total={total} contradicts pick {pick!r} (over the line)")
+        elif ou.group(1) == "over" and total < line:
+            out.append(f"{label}: scoreline {a}-{b} total={total} contradicts pick {pick!r} (under the line)")
+
+    if "btts" in plow or "both teams to score" in plow:
+        both = a > 0 and b > 0
+        wants_no = re.search(r"\bno\b", plow) is not None
+        wants_yes = (not wants_no) and re.search(r"\byes\b", plow) is not None
+        # Default to 'yes' when neither yes/no is explicit (matches BettingPreviewPanel).
+        wants_yes = wants_yes or not (wants_no or wants_yes)
+        if wants_yes and not both:
+            out.append(f"{label}: scoreline {a}-{b} has a clean sheet but pick {pick!r} needs both to score")
+        elif wants_no and both:
+            out.append(f"{label}: scoreline {a}-{b} has both scoring but pick {pick!r} is BTTS No")
+    return out
+
+
 def upsert_preview(sb, match: dict, slug: str, data: dict) -> None:
     row = {k: data[k] for k in PREVIEW_COLUMNS if k in data}
     row["match_id"] = match["id"]
@@ -524,6 +567,8 @@ def run_match(sb, client, match: dict, dry_run: bool) -> bool:
     data = clean_strings(data)  # swap em dashes before write
     for issue in lint_preview(f"M{match['match_number']}", data):
         print(f"      lint: {issue}")
+    for issue in check_scoreline_pick_consistency(f"M{match['match_number']}", data):
+        print(f"      warn: {issue}")
 
     if dry_run:
         def block(label: str, text) -> None:
