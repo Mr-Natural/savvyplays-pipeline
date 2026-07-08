@@ -26,7 +26,7 @@ def env(name: str, required: bool = True) -> str:
     val = os.environ.get(name, "")
     if required and not val:
         sys.exit(
-            f"Missing env var {name}. Add it to E:\\OneDrive\\World_Cup\\.env "
+            f"Missing env var {name}. Add it to C:/Users/shaun/OneDrive/World_Cup/.env "
             f"(see .env.example)."
         )
     return val

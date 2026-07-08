@@ -96,7 +96,7 @@ def load_env() -> None:
     candidates += [
         Path.cwd() / ".env.local",
         Path(__file__).resolve().parent / ".env.local",
-        Path("E:/OneDrive/Dev/savvyplays/.env.local"),
+        Path("C:/dev/savvyplays/.env.local"),
     ]
     for path in candidates:
         try:
