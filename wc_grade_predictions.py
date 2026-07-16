@@ -310,8 +310,10 @@ def grade_team(
         actual_status = "advanced"
     elif actual_pos == 4:
         actual_status = "eliminated"
+    elif best_thirds is not None:
+        actual_status = "advanced" if best_thirds.get(team["id"], False) else "eliminated"
     else:
-        actual_status = "tbd"  # 3rd-place: best-thirds decides
+        actual_status = "tbd"  # 3rd-place: best-thirds ranking not yet final
     result["actual_status"] = actual_status
 
     if pred_exit is None or actual_status == "tbd":
